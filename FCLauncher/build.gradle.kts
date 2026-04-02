@@ -9,22 +9,20 @@ android {
     namespace = "com.tungsten.fclauncher"
     compileSdk = libs.versions.compileSdk.get().toInt()
 
-    defaultConfig {
+        defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()
+        
+        // Добавляем поддержку 64-бит для твоего Snapdragon 8 Elite
+        ndk {
+            abiFilters.add("arm64-v8a")
+            abiFilters.add("armeabi-v7a")
+        }
+
+        // Подключаем твой Client ID из секретов GitHub
+        val msId = System.getenv("MS_CLIENT_ID") ?: "Dfd6ade0-268d-464f-b00e-d19eea7b2ef5"
+        buildConfigField("String", "MS_CLIENT_ID", "\"$msId\"")
     }
 
-    lint {
-        targetSdk = libs.versions.targetSdk.get().toInt()
-    }
-
-    buildTypes {
-        getByName("release") {
-            isMinifyEnabled = false
-        }
-        create("fordebug") {
-            initWith(getByName("debug"))
-        }
-    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -39,9 +37,11 @@ android {
 
     ndkVersion = "27.0.12077973"
 
-    buildFeatures {
+        buildFeatures {
         prefab = true
+        buildConfig = true
     }
+
 
     kotlin {
         compilerOptions {
