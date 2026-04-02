@@ -72,13 +72,15 @@ public class MicrosoftService {
         }, (uuid, e) -> LOG.log(Level.WARNING, "Failed to fetch properties of " + uuid, e), POOL);
     }
 
-    public ObservableOptionalCache<UUID, CompleteGameProfile, AuthenticationException> getProfileRepository() {
-        return profileRepository;
-    }
-
     public MicrosoftSession authenticate() throws AuthenticationException {
         try {
-            OAuth.Result result = OAuth.MICROSOFT.authenticate(OAuth.GrantFlow.DEVICE, new OAuth.Options(SCOPE, callback));
+            // ID
+            String myClientId = "Dfd6ade0-268d-464f-b00e-d19eea7b2ef5";
+            
+            OAuth.Result result = OAuth.MICROSOFT.authenticate(
+                OAuth.GrantFlow.DEVICE, 
+                new OAuth.Options(SCOPE, callback, myClientId) // Добавляем ID третьим параметром
+            );
             return authenticateViaLiveAccessToken(result.accessToken(), result.refreshToken());
         } catch (IOException e) {
             throw new ServerDisconnectException(e);
@@ -86,10 +88,16 @@ public class MicrosoftService {
             throw new ServerResponseMalformedException(e);
         }
     }
+
 
     public MicrosoftSession refresh(MicrosoftSession oldSession) throws AuthenticationException {
         try {
-            OAuth.Result result = OAuth.MICROSOFT.refresh(oldSession.getRefreshToken(), new OAuth.Options(SCOPE, callback));
+            String myClientId = "Dfd6ade0-268d-464f-b00e-d19eea7b2ef5";
+            
+            OAuth.Result result = OAuth.MICROSOFT.refresh(
+                oldSession.getRefreshToken(), 
+                new OAuth.Options(SCOPE, callback, myClientId)
+            );
             return authenticateViaLiveAccessToken(result.accessToken(), result.refreshToken());
         } catch (IOException e) {
             throw new ServerDisconnectException(e);
@@ -97,6 +105,7 @@ public class MicrosoftService {
             throw new ServerResponseMalformedException(e);
         }
     }
+
 
     private String getUhs(XBoxLiveAuthenticationResponse response, String existingUhs) throws AuthenticationException {
         if (response.errorCode != 0) {
