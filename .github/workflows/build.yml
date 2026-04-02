@@ -1,7 +1,7 @@
 name: Build FCL Elite
 
 on:
-  workflow_dispatch: # Чтобы ты мог запустить кнопку вручную
+  workflow_dispatch:
 
 jobs:
   build:
@@ -10,7 +10,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive # Важно для FCL, так как там есть зависимости
+          submodules: recursive
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -22,16 +22,19 @@ jobs:
       - name: Grant Execute Permission
         run: chmod +x gradlew
 
-      - name: Build APK
+      - name: Build All APKs
         env:
           MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
-        # Собираем конкретно модуль лаунчера
-        run: ./gradlew :FCLauncher:assembleDebug
+        # Собираем всё сразу, чтобы не промахнуться с модулем
+        run: ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Check Created Files (Debug)
+        # Эта команда покажет в логах, где именно лежат APK
+        run: find . -name "*.apk"
+
+      - name: Upload Everything
         uses: actions/upload-artifact@v4
         with:
-          name: FCL-Elite-Build
+          name: FCL-Elite-Package
+          # Ищем во всех папках репозитория
           path: "**/*.apk"
-
-
