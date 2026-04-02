@@ -49,7 +49,7 @@ jobs:
       - name: Build ${{matrix.arch}} .apk
         run: |
           chmod +x gradlew
-          ./gradlew assemblerelease -Darch=${{ matrix.arch }} --no-daemon
+          ./gradlew assembleDebug -Pandroid.bundle.enableUncompressedNativeLibs=false
 
       - name: Upload apk
         if: startsWith(github.ref, 'refs/heads/')
