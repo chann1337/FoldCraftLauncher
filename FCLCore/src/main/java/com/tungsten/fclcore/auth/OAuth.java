@@ -238,18 +238,214 @@ public class OAuth {
         Session startServer() throws IOException, AuthenticationException;
 
         void grantDeviceCode(String userCode, String verificationURI);
+package com.tungsten.fclcore.auth;
 
-        /**
-         * Open browser
-         *
-         * @param url OAuth url.
-         */
+import static com.tungsten.fclcore.util.Lang.mapOf;
+import static com.tungsten.fclcore.util.Pair.pair;
+
+import com.google.gson.JsonParseException;
+import com.google.gson.annotations.SerializedName;
+import com.tungsten.fclcore.auth.yggdrasil.RemoteAuthenticationException;
+import com.tungsten.fclcore.util.io.HttpRequest;
+import com.tungsten.fclcore.util.io.NetworkUtils;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+
+public class OAuth {
+    // Вставляем твой ID прямо сюда, в "сердце" лаунчера
+    public static final OAuth MICROSOFT = new OAuth(
+            "https://login.live.com/oauth20_authorize.srf",
+            "https://login.live.com/oauth20_token.srf",
+            "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode",
+            "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+            "Dfd6ade0-268d-464f-b00e-d19eea7b2ef5"); // Твой ID
+
+    private final String authorizationURL;
+    private final String accessTokenURL;
+    private final String deviceCodeURL;
+    private final String tokenURL;
+    private final String clientId; // Новое поле для хранения ID
+    public static boolean IS_CANCELED = false;
+
+    public OAuth(String authorizationURL, String accessTokenURL, String deviceCodeURL, String tokenURL, String clientId) {
+        this.authorizationURL = authorizationURL;
+        this.accessTokenURL = accessTokenURL;
+        this.deviceCodeURL = deviceCodeURL;
+        this.tokenURL = tokenURL;
+        this.clientId = clientId;
+    }
+
+    public Result authenticate(GrantFlow grantFlow, Options options) throws AuthenticationException {
+        try {
+            switch (grantFlow) {
+                case AUTHORIZATION_CODE:
+                    return authenticateAuthorizationCode(options);
+                case DEVICE:
+                    return authenticateDevice(options);
+                default:
+                    throw new UnsupportedOperationException("grant flow " + grantFlow);
+            }
+        } catch (IOException e) {
+            throw new ServerDisconnectException(e);
+        } catch (InterruptedException e) {
+            throw new NoSelectedCharacterException();
+        } catch (ExecutionException e) {
+            if (e.getCause() instanceof InterruptedException) {
+                throw new NoSelectedCharacterException();
+            } else {
+                throw new ServerDisconnectException(e);
+            }
+        } catch (JsonParseException e) {
+            throw new ServerResponseMalformedException(e);
+        }
+    }
+
+    private Result authenticateAuthorizationCode(Options options) throws IOException, InterruptedException, JsonParseException, ExecutionException, AuthenticationException {
+        Session session = options.callback.startServer();
+        // Используем наш clientId вместо options.callback.getClientId()
+        options.callback.openBrowser(NetworkUtils.withQuery(authorizationURL,
+                mapOf(pair("client_id", clientId), pair("response_type", "code"),
+                        pair("redirect_uri", session.getRedirectURI()), pair("scope", options.scope),
+                        pair("prompt", "select_account"))));
+        String code = session.waitFor();
+
+        AuthorizationResponse response = HttpRequest.POST(accessTokenURL)
+                .form(pair("client_id", clientId), pair("code", code),
+                        pair("grant_type", "authorization_code"), pair("client_secret", options.callback.getClientSecret()),
+                        pair("redirect_uri", session.getRedirectURI()), pair("scope", options.scope))
+                .ignoreHttpCode()
+                .retry(5)
+                .getJson(AuthorizationResponse.class);
+        handleErrorResponse(response);
+        return new Result(response.accessToken, response.refreshToken);
+    }
+
+    private Result authenticateDevice(Options options) throws IOException, InterruptedException, JsonParseException, AuthenticationException {
+        // Подставляем наш clientId
+        DeviceTokenResponse deviceTokenResponse = HttpRequest.POST(deviceCodeURL)
+                .form(pair("client_id", clientId), pair("scope", options.scope))
+                .ignoreHttpCode()
+                .retry(5)
+                .getJson(DeviceTokenResponse.class);
+        handleErrorResponse(deviceTokenResponse);
+
+        options.callback.grantDeviceCode(deviceTokenResponse.userCode, deviceTokenResponse.verificationURI);
+        options.callback.openBrowser(deviceTokenResponse.verificationURI);
+
+        long startTime = System.nanoTime();
+        long interval = TimeUnit.MILLISECONDS.convert(deviceTokenResponse.interval, TimeUnit.SECONDS);
+        IS_CANCELED = false;
+        while (true) {
+            if (IS_CANCELED) {
+                throw new CancellationException();
+            }
+            Thread.sleep(Math.max(interval, 1));
+
+            long estimatedTime = System.nanoTime() - startTime;
+            if (TimeUnit.SECONDS.convert(estimatedTime, TimeUnit.NANOSECONDS) >= Math.min(deviceTokenResponse.expiresIn, 900)) {
+                throw new NoSelectedCharacterException();
+            }
+
+            TokenResponse tokenResponse = HttpRequest.POST(tokenURL)
+                    .form(
+                            pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                            pair("code", deviceTokenResponse.deviceCode),
+                            pair("client_id", clientId)) // Снова наш ID
+                    .ignoreHttpCode()
+                    .retry(5)
+                    .getJson(TokenResponse.class);
+
+            if ("authorization_pending".equals(tokenResponse.error)) {
+                continue;
+            }
+            if ("expired_token".equals(tokenResponse.error)) {
+                throw new NoSelectedCharacterException();
+            }
+            if ("slow_down".equals(tokenResponse.error)) {
+                interval += 5000;
+                continue;
+            }
+
+            return new Result(tokenResponse.accessToken, tokenResponse.refreshToken);
+        }
+    }
+
+    public Result refresh(String refreshToken, Options options) throws AuthenticationException {
+        try {
+            // И здесь используем наш фиксированный clientId
+            Map<String, String> query = mapOf(pair("client_id", clientId),
+                    pair("refresh_token", refreshToken),
+                    pair("grant_type", "refresh_token")
+            );
+
+            if (!options.callback.isPublicClient()) {
+                query.put("client_secret", options.callback.getClientSecret());
+            }
+
+            RefreshResponse response = HttpRequest.POST(tokenURL)
+                    .form(query)
+                    .accept("application/json")
+                    .ignoreHttpCode()
+                    .retry(5)
+                    .getJson(RefreshResponse.class);
+
+            handleErrorResponse(response);
+            return new Result(response.accessToken, response.refreshToken);
+        } catch (IOException e) {
+            throw new ServerDisconnectException(e);
+        } catch (JsonParseException e) {
+            throw new ServerResponseMalformedException(e);
+        }
+    }
+
+    private static void handleErrorResponse(ErrorResponse response) throws AuthenticationException {
+        if (response.error == null || response.errorDescription == null) {
+            return;
+        }
+        switch (response.error) {
+            case "invalid_grant":
+                if (response.errorDescription.contains("AADSTS70000")) {
+                    throw new CredentialExpiredException();
+                }
+                break;
+        }
+        throw new RemoteAuthenticationException(response.error, response.errorDescription, "");
+    }
+
+    public static class Options {
+        private String userAgent;
+        private final String scope;
+        private final Callback callback;
+
+        public Options(String scope, Callback callback) {
+            this.scope = scope;
+            this.callback = callback;
+        }
+
+        public Options setUserAgent(String userAgent) {
+            this.userAgent = userAgent;
+            return this;
+        }
+    }
+
+    public interface Session {
+        String getRedirectURI();
+        String waitFor() throws InterruptedException, ExecutionException;
+        default String getIdToken() {
+            return null;
+        }
+    }
+
+    public interface Callback {
+        Session startServer() throws IOException, AuthenticationException;
+        void grantDeviceCode(String userCode, String verificationURI);
         void openBrowser(String url) throws IOException;
-
         String getClientId();
-
         String getClientSecret();
-
         boolean isPublicClient();
     }
 
@@ -264,19 +460,12 @@ public class OAuth {
     private static class DeviceTokenResponse extends ErrorResponse {
         @SerializedName("user_code")
         public String userCode;
-
         @SerializedName("device_code")
         public String deviceCode;
-
-        // The URI to be visited for user.
         @SerializedName("verification_uri")
         public String verificationURI;
-
-        // Lifetime in seconds for device_code and user_code
         @SerializedName("expires_in")
         public int expiresIn;
-
-        // Polling interval
         @SerializedName("interval")
         public int interval;
     }
@@ -284,60 +473,40 @@ public class OAuth {
     private static class TokenResponse extends ErrorResponse {
         @SerializedName("token_type")
         public String tokenType;
-
         @SerializedName("expires_in")
         public int expiresIn;
-
         @SerializedName("ext_expires_in")
         public int extExpiresIn;
-
         @SerializedName("scope")
         public String scope;
-
         @SerializedName("access_token")
         public String accessToken;
-
         @SerializedName("refresh_token")
         public String refreshToken;
-
     }
 
     private static class ErrorResponse {
         @SerializedName("error")
         public String error;
-
         @SerializedName("error_description")
         public String errorDescription;
-
         @SerializedName("correlation_id")
         public String correlationId;
     }
 
-    /**
-     * Error response: {"error":"invalid_grant","error_description":"The provided
-     * value for the 'redirect_uri' is not valid. The value must exactly match the
-     * redirect URI used to obtain the authorization
-     * code.","correlation_id":"??????"}
-     */
     public static class AuthorizationResponse extends ErrorResponse {
         @SerializedName("token_type")
         public String tokenType;
-
         @SerializedName("expires_in")
         public int expiresIn;
-
         @SerializedName("scope")
         public String scope;
-
         @SerializedName("access_token")
         public String accessToken;
-
         @SerializedName("refresh_token")
         public String refreshToken;
-
         @SerializedName("user_id")
         public String userId;
-
         @SerializedName("foci")
         public String foci;
     }
@@ -345,10 +514,8 @@ public class OAuth {
     private static class RefreshResponse extends ErrorResponse {
         @SerializedName("expires_in")
         int expiresIn;
-
         @SerializedName("access_token")
         String accessToken;
-
         @SerializedName("refresh_token")
         String refreshToken;
     }
